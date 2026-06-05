@@ -1,0 +1,10 @@
+{
+    "venvPath": "D:\\Projects\\Personal-Finance\\backend",
+    "venv": "venv",
+    "pythonVersion": "3.13",
+    "extraPaths": [
+        "D:\\Projects\\Personal-Finance\\backend\\venv\\Lib\\site-packages"
+    ],
+    "reportMissingImports": false,
+    "reportMissingModuleSource": false
+}
