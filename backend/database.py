@@ -1,9 +1,13 @@
+import os
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
+from dotenv import load_dotenv
 
-# Oya copy karagaththu link eka methana danna (Quotes " " athule)
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres.mrxknagisuehfnmvjjvg:AYF$kpT!aC2P7uk@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"
+# Load environment variables from .env file
+load_dotenv()
+
+# Read database URL from environment variable
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
