@@ -1,12 +1,35 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Home, ReceiptText, Users, Plus, Bell, ArrowUpRight, ArrowDownRight, ChevronRight, Wallet, X, CheckCircle, Trash2, Download, Search, Target, Check, ImagePlus, MinusCircle, Printer, RotateCcw, UserPlus, Star, MapPin, Calendar, Phone, Activity, Minus, CreditCard, TrendingUp, PieChart as PieChartIcon, Edit, AlertTriangle, Gift } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Home, ReceiptText, Users, Plus, Bell, ArrowUpRight, ArrowDownRight, ChevronRight, Wallet, X, CheckCircle, Trash2, Download, Search, Target, Check, ImagePlus, MinusCircle, Printer, RotateCcw, UserPlus, Star, MapPin, Calendar, Phone, Activity, Minus, CreditCard, TrendingUp, PieChart as PieChartIcon, Edit, AlertTriangle, Gift, Building2, RefreshCw, ArrowLeftRight } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, CartesianGrid, AreaChart, Area } from 'recharts';
+// M-2: Centralized API base URL
+const API_BASE = 'http://127.0.0.1:8000';
+
 export default function App() {
+  const ACCOUNTS = ['Cash in Hand', 'Bank Account', 'COD Pending'];
+
+  // L-1: Loading state for API calls
+  const [isLoading, setIsLoading] = useState(true);
+
+  // L-3: Toast timeout ref to prevent race conditions
+  const toastTimeoutRef = useRef(null);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [txType, setTxType] = useState('Income');
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
+  const [accountName, setAccountName] = useState('Cash in Hand');
+
+  // Transfer modal state
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferData, setTransferData] = useState({ fromAccount: 'Cash in Hand', toAccount: 'Bank Account', amount: '', description: '' });
   const [toast, setToast] = useState({ visible: false, message: '' });
+
+  // L-3: Safe toast helper that cancels previous timeout
+  const showToast = (message, duration = 3000) => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToast({ visible: true, message });
+    toastTimeoutRef.current = setTimeout(() => setToast({ visible: false, message: '' }), duration);
+  };
 
   // Delete karanna ahan inna transaction eke ID eka save karaganna state eka
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
@@ -30,9 +53,12 @@ export default function App() {
   const [orderSearchQuery, setOrderSearchQuery] = useState('');
   const [walletFilter, setWalletFilter] = useState('Monthly');
   
+  const [editingTransactionId, setEditingTransactionId] = useState(null);
+  const [editingAmount, setEditingAmount] = useState('');
+
   const fetchTransactions = async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/transactions');
+      const response = await fetch(`${API_BASE}/api/transactions`);
       const result = await response.json();
       if (result.status === 'success') {
         setTransactions(result.data);
@@ -44,7 +70,7 @@ export default function App() {
 
   const fetchCustomers = async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/customers');
+      const response = await fetch(`${API_BASE}/api/customers`);
       const result = await response.json();
       if (result.status === 'success') {
         setCustomers(result.data);
@@ -54,20 +80,48 @@ export default function App() {
     }
   };
 
+  const saveTransactionAmount = async (id) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/transactions/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: parseFloat(editingAmount) })
+      });
+      if (response.ok) {
+        showToast("Amount updated successfully");
+        setEditingTransactionId(null);
+        fetchTransactions();
+      } else {
+        showToast("Failed to update amount");
+      }
+    } catch (error) {
+      showToast("Network error! Server is down.");
+    }
+  };
+
   useEffect(() => {
-    fetchTransactions();
-    fetchCustomers();
+    Promise.all([fetchTransactions(), fetchCustomers()]).finally(() => setIsLoading(false));
   }, []);
 
   const totalIncome = transactions
-    .filter(tx => tx.type === 'Income')
+    .filter(tx => tx.type === 'Income' && tx.category !== 'Account Transfer')
     .reduce((sum, tx) => sum + tx.amount, 0);
 
   const totalExpense = transactions
-    .filter(tx => tx.type === 'Expense')
+    .filter(tx => tx.type === 'Expense' && tx.category !== 'Account Transfer')
     .reduce((sum, tx) => sum + tx.amount, 0);
 
   const availableBalance = totalIncome - totalExpense;
+
+  // Per-account net balance calculations
+  const getAccountBalance = (accountLabel) => {
+    const inc = transactions.filter(tx => tx.type === 'Income' && tx.account_name === accountLabel).reduce((s, tx) => s + tx.amount, 0);
+    const exp = transactions.filter(tx => tx.type === 'Expense' && tx.account_name === accountLabel).reduce((s, tx) => s + tx.amount, 0);
+    return inc - exp;
+  };
+  const cashBalance = getAccountBalance('Cash in Hand');
+  const bankBalance = getAccountBalance('Bank Account');
+  const codBalance = getAccountBalance('COD Pending');
 
   const incomeCategories = ["Cactus sale Online", "Cactus Sale Physical", "Scholarship", "Other"];
   const expenseCategories = ["Plants", "Plant Accessories", "Other"];
@@ -77,6 +131,7 @@ export default function App() {
   // Analytics Data Preparation (Aggregate by Date for the chart)
   const aggregatedData = {};
   [...transactions].reverse().forEach(tx => {
+    if (tx.category === 'Account Transfer') return;
     const dateStr = new Date(tx.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     if (!aggregatedData[dateStr]) {
       aggregatedData[dateStr] = { name: dateStr, Income: 0, Expense: 0 };
@@ -116,21 +171,18 @@ export default function App() {
     if (!deleteConfirmId) return;
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/transactions/${deleteConfirmId}`, {
+      const response = await fetch(`${API_BASE}/api/transactions/${deleteConfirmId}`, {
         method: 'DELETE',
       });
 
       if (response.ok) {
-        setToast({ visible: true, message: "Transaction deleted successfully" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast("Transaction deleted successfully");
         fetchTransactions(); 
       } else {
-        setToast({ visible: true, message: "Failed to delete transaction" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast("Failed to delete transaction");
       }
     } catch (error) {
-      setToast({ visible: true, message: "Network error! Server is down." });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Network error! Server is down.");
     }
     
     // Wede iwara wunama delete popup eka wahanawa
@@ -143,20 +195,20 @@ export default function App() {
     const finalCategory = categorySelect === 'Other' ? customCategory.trim() : categorySelect;
 
     if (!amount || !finalCategory) {
-      setToast({ visible: true, message: "Please enter amount and category" });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Please enter amount and category");
       return;
     }
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/transactions', {
+      const response = await fetch(`${API_BASE}/api/transactions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           type: txType,
           amount: parseFloat(amount),
           category: finalCategory, 
-          description: description
+          description: description,
+          account_name: accountName
         }),
       });
 
@@ -166,25 +218,94 @@ export default function App() {
         setCustomCategory('');
         setDescription('');
         setTxType('Income');
+        setAccountName('Cash in Hand');
         setIsModalOpen(false);
         
-        setToast({ visible: true, message: "Transaction saved successfully" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast("Transaction saved successfully");
         
         fetchTransactions();
       } else {
-        setToast({ visible: true, message: "Failed to save transaction" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast("Failed to save transaction");
       }
     } catch (error) {
-      setToast({ visible: true, message: "Network error! Server is down." });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Network error! Server is down.");
+    }
+  };
+
+  const handleTransfer = async () => {
+    if (!transferData.amount || parseFloat(transferData.amount) <= 0) {
+      showToast("Please enter a valid transfer amount");
+      return;
+    }
+    if (transferData.fromAccount === transferData.toAccount) {
+      showToast("Source and destination accounts must differ");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from_account: transferData.fromAccount,
+          to_account: transferData.toAccount,
+          amount: parseFloat(transferData.amount),
+          description: transferData.description || null
+        }),
+      });
+      if (response.ok) {
+        showToast(`Transferred LKR ${parseFloat(transferData.amount).toLocaleString()} from ${transferData.fromAccount} to ${transferData.toAccount}`);
+        setTransferData({ fromAccount: 'Cash in Hand', toAccount: 'Bank Account', amount: '', description: '' });
+        setIsTransferModalOpen(false);
+        fetchTransactions();
+      } else {
+        const err = await response.json();
+        showToast(err.detail || "Transfer failed");
+      }
+    } catch (error) {
+      showToast("Network error! Server is down.");
+    }
+  };
+
+  const handleMonthEndSettlement = async () => {
+    if (cashBalance <= 0) {
+      showToast("No active cash balance to settle");
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to settle LKR ${cashBalance.toLocaleString()} to your Bank Account?`)) {
+      return;
+    }
+    try {
+      const now = new Date();
+      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+      const response = await fetch(`${API_BASE}/api/transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from_account: 'Cash in Hand',
+          to_account: 'Bank Account',
+          amount: cashBalance,
+          description: 'Month End Settlement',
+          date: endOfMonth.toISOString()
+        }),
+      });
+      if (response.ok) {
+        showToast(`Month End Settlement of LKR ${cashBalance.toLocaleString()} successful!`);
+        fetchTransactions();
+      } else {
+        const err = await response.json();
+        showToast(err.detail || "Settlement failed");
+      }
+    } catch (error) {
+      showToast("Network error! Server is down.");
     }
   };
 
   const formatDate = (dateString) => {
-    const options = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-    return new Date(dateString).toLocaleDateString('en-US', options);
+    if (!dateString) return '';
+    const d = new Date(dateString);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
 
   const handleTypeChange = (newType) => {
@@ -215,6 +336,7 @@ export default function App() {
     a.setAttribute("href", url);
     a.setAttribute("download", "blooming_barrels_transactions.csv");
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   // Dashboard eke pennanna recent ma transactions 5k witharak ganna
@@ -247,11 +369,11 @@ export default function App() {
   });
 
   const currentMonthIncome = transactions
-    .filter(tx => tx.type === 'Income' && new Date(tx.date || Date.now()).getMonth() === new Date().getMonth() && new Date(tx.date || Date.now()).getFullYear() === new Date().getFullYear())
+    .filter(tx => tx.type === 'Income' && tx.category !== 'Account Transfer' && new Date(tx.date || Date.now()).getMonth() === new Date().getMonth() && new Date(tx.date || Date.now()).getFullYear() === new Date().getFullYear())
     .reduce((sum, tx) => sum + tx.amount, 0);
 
   const currentMonthExpense = transactions
-    .filter(tx => tx.type === 'Expense' && new Date(tx.date || Date.now()).getMonth() === new Date().getMonth() && new Date(tx.date || Date.now()).getFullYear() === new Date().getFullYear())
+    .filter(tx => tx.type === 'Expense' && tx.category !== 'Account Transfer' && new Date(tx.date || Date.now()).getMonth() === new Date().getMonth() && new Date(tx.date || Date.now()).getFullYear() === new Date().getFullYear())
     .reduce((sum, tx) => sum + tx.amount, 0);
     
   const targetProgress = monthlyTarget > 0 ? Math.min((currentMonthIncome / monthlyTarget) * 100, 100) : 0;
@@ -411,6 +533,7 @@ export default function App() {
   const expenseCategoryData = {};
   transactions.filter(tx => {
     if (tx.type !== 'Expense') return false;
+    if (tx.category === 'Account Transfer') return false;
     if (dateFilter === 'This Month') {
       return new Date(tx.date).getMonth() === new Date().getMonth() && new Date(tx.date).getFullYear() === new Date().getFullYear();
     }
@@ -437,7 +560,7 @@ export default function App() {
     addressLine2: '',
     city: '',
     gender: 'Male', // Default selection
-    items: [{ id: Date.now(), name: '', qty: 1, price: 0, photo: null }]
+    items: [{ id: crypto.randomUUID(), name: '', qty: 1, price: 0, photo: null }]
   });
 
   const handleBillItemChange = (id, field, value) => {
@@ -450,7 +573,7 @@ export default function App() {
   const addBillItem = () => {
     setBillData(prev => ({ 
       ...prev, 
-      items: [...prev.items, { id: Date.now(), name: '', qty: 1, price: 0, photo: null }] 
+      items: [...prev.items, { id: crypto.randomUUID(), name: '', qty: 1, price: 0, photo: null }] 
     }));
   };
 
@@ -467,7 +590,13 @@ export default function App() {
       const photoUrl = URL.createObjectURL(file);
       setBillData(prev => ({
         ...prev,
-        items: prev.items.map(item => item.id === id ? { ...item, photo: photoUrl } : item)
+        items: prev.items.map(item => {
+          if (item.id === id) {
+            if (item.photo) URL.revokeObjectURL(item.photo);
+            return { ...item, photo: photoUrl };
+          }
+          return item;
+        })
       }));
     }
   };
@@ -476,10 +605,16 @@ export default function App() {
   const [paymentMethod, setPaymentMethod] = useState('Direct');
   const [courierCharge, setCourierCharge] = useState('');
   const [trackingNumber, setTrackingNumber] = useState('');
+  const [internalExpense, setInternalExpense] = useState('');
   // --- PERSISTED PENDING BILLS STATE ---
+  // L-4: Wrapped in try/catch to handle corrupt localStorage data
   const [pendingBills, setPendingBills] = useState(() => {
-    const savedPending = localStorage.getItem('pendingBills');
-    return savedPending ? JSON.parse(savedPending) : [];
+    try {
+      const savedPending = localStorage.getItem('pendingBills');
+      return savedPending ? JSON.parse(savedPending) : [];
+    } catch {
+      return [];
+    }
   });
 
   // Tracking number inline editing states
@@ -489,6 +624,7 @@ export default function App() {
   // --- CRM STATES & DIALOGS ---
   const [searchQueryCRM, setSearchQueryCRM] = useState('');
   const [customers, setCustomers] = useState([]);
+  const [isClientDropdownOpen, setIsClientDropdownOpen] = useState(false);
   const [isClientModalOpen, setIsClientModalOpen] = useState(false);
   const [editingClient, setEditingClient] = useState(null);
   const [clientFormData, setClientFormData] = useState({
@@ -547,7 +683,7 @@ export default function App() {
               type: 'birthday',
               title: `${c.name}'s Birthday`,
               message: diffDays === 0
-                ? `Today is ${c.name}'s birthday! 🎉`
+                ? `Today is ${c.name}'s birthday! ðŸŽ‰`
                 : `${c.name}'s birthday is in ${diffDays} day${diffDays > 1 ? 's' : ''} (${dobParts.slice(1).join('/')}).`,
               date: c.dob
             });
@@ -567,7 +703,7 @@ export default function App() {
       } else if (progress < 100) {
         msg = `Almost there! You are at ${progress.toFixed(1)}% of your LKR ${monthlyTarget.toLocaleString()} target. Just a final push!`;
       } else {
-        msg = `Fantastic job! 🎉 You have achieved ${progress.toFixed(1)}% of your LKR ${monthlyTarget.toLocaleString()} monthly target. Goal achieved!`;
+        msg = `Fantastic job! ðŸŽ‰ You have achieved ${progress.toFixed(1)}% of your LKR ${monthlyTarget.toLocaleString()} monthly target. Goal achieved!`;
       }
       list.push({
         id: 'target-motivation',
@@ -657,16 +793,15 @@ export default function App() {
   const handleSaveClient = async (e) => {
     e.preventDefault();
     if (!clientFormData.name.trim()) {
-      setToast({ visible: true, message: "Please enter client name" });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Please enter client name");
       return;
     }
 
     try {
       const isEdit = !!editingClient;
       const url = isEdit 
-        ? `http://127.0.0.1:8000/api/customers/${editingClient.id}`
-        : 'http://127.0.0.1:8000/api/customers';
+        ? `${API_BASE}/api/customers/${editingClient.id}`
+        : `${API_BASE}/api/customers`;
       
       const method = isEdit ? 'PUT' : 'POST';
       
@@ -690,8 +825,7 @@ export default function App() {
       const result = await response.json();
 
       if (response.ok) {
-        setToast({ visible: true, message: isEdit ? "Client updated successfully!" : "Client added successfully!" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast(isEdit ? "Client updated successfully!" : "Client added successfully!");
         setIsClientModalOpen(false);
         fetchCustomers();
       } else {
@@ -700,12 +834,10 @@ export default function App() {
           : (Array.isArray(result.detail) 
               ? result.detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join(', ') 
               : "Failed to save client");
-        setToast({ visible: true, message: errorMsg });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast(errorMsg);
       }
     } catch (error) {
-      setToast({ visible: true, message: "Network error! Server is down." });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Network error! Server is down.");
     }
   };
 
@@ -717,21 +849,18 @@ export default function App() {
     if (!deleteCustomerConfirmId) return;
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/customers/${deleteCustomerConfirmId}`, {
+      const response = await fetch(`${API_BASE}/api/customers/${deleteCustomerConfirmId}`, {
         method: 'DELETE',
       });
 
       if (response.ok) {
-        setToast({ visible: true, message: "Client deleted successfully" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast("Client deleted successfully");
         fetchCustomers();
       } else {
-        setToast({ visible: true, message: "Failed to delete client" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast("Failed to delete client");
       }
     } catch (error) {
-      setToast({ visible: true, message: "Network error! Server is down." });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Network error! Server is down.");
     }
     setDeleteCustomerConfirmId(null);
   };
@@ -743,8 +872,7 @@ export default function App() {
   const executeDeletePendingBill = () => {
     if (!deletePendingBillConfirmId) return;
     setPendingBills(prev => prev.filter(b => b.id !== deletePendingBillConfirmId));
-    setToast({ visible: true, message: "Pending delivery removed successfully" });
-    setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+    showToast("Pending delivery removed successfully");
     setDeletePendingBillConfirmId(null);
   };
 
@@ -757,6 +885,19 @@ export default function App() {
     (c.name || '').toLowerCase().includes(searchQueryCRM.toLowerCase()) || 
     (c.city && c.city.toLowerCase().includes(searchQueryCRM.toLowerCase()))
   );
+
+  const filteredSuggestions = useMemo(() => {
+    if (!customers) return [];
+    const query = (billData.customerName || '').trim().toLowerCase();
+    if (!query) {
+      return [...customers]
+        .sort((a, b) => (b.total_orders || 0) - (a.total_orders || 0))
+        .slice(0, 5);
+    }
+    return customers.filter(c => 
+      (c.name || '').toLowerCase().includes(query)
+    );
+  }, [customers, billData.customerName]);
 
 // Auto-save pending bills to localStorage whenever it changes
   useEffect(() => {
@@ -804,13 +945,13 @@ export default function App() {
   };
 
   const parsedCourierCharge = paymentMethod === 'COD' ? (parseFloat(courierCharge) || 0) : 0;
+  const parsedInternalExpense = parseFloat(internalExpense) || 0;
   const profitAmount = billData.items.reduce((sum, item) => sum + (item.qty * item.price), 0);
   const billTotal = profitAmount + parsedCourierCharge;
 
   const handleCompleteOrder = () => {
     if (!billData.customerName) {
-      setToast({ visible: true, message: "Please enter customer name to complete order" });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Please enter customer name to complete order");
       return;
     }
 
@@ -818,7 +959,7 @@ export default function App() {
     window.print();
 
     // 2. Save the order to Pending Deliveries
-    const newBill = { ...billData, id: Date.now(), paymentMethod, courierCharge: parsedCourierCharge, trackingNumber, profitAmount, total: billTotal };
+    const newBill = { ...billData, id: crypto.randomUUID(), paymentMethod, courierCharge: parsedCourierCharge, internalExpense: parsedInternalExpense, trackingNumber, profitAmount, total: billTotal };
     setPendingBills(prev => [newBill, ...prev]);
 
     // 3. Reset form, show success message, and scroll up (slight timeout ensures print triggers safely)
@@ -829,13 +970,14 @@ export default function App() {
         addressLine1: '',
         addressLine2: '',
         city: '',
-        items: [{ id: Date.now(), name: '', qty: 1, price: 0, photo: null }]
+        gender: 'Male',
+        items: [{ id: crypto.randomUUID(), name: '', qty: 1, price: 0, photo: null }]
       });
       setPaymentMethod('Direct'); 
       setCourierCharge(''); 
       setTrackingNumber('');
-      setToast({ visible: true, message: "Order Completed & Saved to Pending!" });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      setInternalExpense('');
+      showToast("Order Completed & Saved to Pending!");
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }, 300);
   };
@@ -848,11 +990,12 @@ export default function App() {
       addressLine2: '',
       city: '',
       gender: 'Male',
-      items: [{ id: Date.now(), name: '', qty: 1, price: 0, photo: null }]
+      items: [{ id: crypto.randomUUID(), name: '', qty: 1, price: 0, photo: null }]
     });
     setPaymentMethod('Direct');
     setCourierCharge('');
     setTrackingNumber('');
+    setInternalExpense('');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -860,22 +1003,27 @@ export default function App() {
     try {
       // Pack city into description to avoid DB schema changes
       const descriptionText = `${bill.paymentMethod} Order - Tracking: ${bill.trackingNumber || 'N/A'} - ${bill.customerName} - ${bill.city || 'No City'}`;
+      // COD orders land in COD Pending, Direct orders land in Cash in Hand
+      const targetAccount = bill.paymentMethod === 'COD' ? 'COD Pending' : 'Cash in Hand';
       
-      const response = await fetch('http://127.0.0.1:8000/api/transactions', {
+      const netProfit = bill.profitAmount - (bill.internalExpense || 0);
+
+      const response = await fetch(`${API_BASE}/api/transactions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           type: 'Income', 
-          amount: bill.profitAmount, 
+          amount: netProfit, 
           category: bill.paymentMethod === 'COD' ? 'Cactus sale Online' : 'Cactus Sale Physical', 
-          description: descriptionText 
+          description: descriptionText,
+          account_name: targetAccount
         }),
       });
 
       if (response.ok) {
         // Record order details inside backend PostgreSQL customers table
         try {
-          await fetch('http://127.0.0.1:8000/api/customers/record-order', {
+          await fetch(`${API_BASE}/api/customers/record-order`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -884,22 +1032,21 @@ export default function App() {
               address_line2: bill.addressLine2 || null,
               city: bill.city || null,
               gender: bill.gender || 'Other',
-              amount: bill.profitAmount
+              amount: netProfit
             })
           });
           fetchCustomers(); // Reload lists from DB
         } catch (err) {
           console.error("Error recording customer order:", err);
+          showToast("Order completed, but customer profile sync failed");
         }
 
         setPendingBills(prev => prev.filter(b => b.id !== bill.id));
-        setToast({ visible: true, message: `Income of LKR ${bill.profitAmount} added!` });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+        showToast(`Income of LKR ${netProfit} added!`);
         fetchTransactions();
       }
     } catch (error) {
-      setToast({ visible: true, message: "Network error! Server is down." });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Network error! Server is down.");
     }
   };
 
@@ -912,8 +1059,7 @@ export default function App() {
       )
     );
     setEditingTrackingBillId(null);
-    setToast({ visible: true, message: "Tracking number updated successfully!" });
-    setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+    showToast("Tracking number updated successfully!");
   };
 
   const isBillActive = billData.customerName.trim() !== '' || billData.items.some(item => item.name.trim() !== '' || item.price > 0 || item.photo);
@@ -965,7 +1111,14 @@ export default function App() {
   ];
   customers.forEach(c => {
     if (!c.dob || c.dob === 'Pending') return;
-    const age = new Date().getFullYear() - new Date(c.dob).getFullYear();
+    const dobDate = new Date(c.dob);
+    if (isNaN(dobDate.getTime())) return;
+    const today = new Date();
+    let age = today.getFullYear() - dobDate.getFullYear();
+    const m = today.getMonth() - dobDate.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < dobDate.getDate())) {
+      age--;
+    }
     if (age >= 18 && age <= 24) ageData[0].count++;
     else if (age >= 25 && age <= 34) ageData[1].count++;
     else if (age >= 35 && age <= 44) ageData[2].count++;
@@ -978,14 +1131,23 @@ export default function App() {
   const [activeMetricModal, setActiveMetricModal] = useState(null); // 'margin' or 'growth'
 
   const [showExpenseForm, setShowExpenseForm] = useState(false);
-  const [expenseData, setExpenseData] = useState({ amount: '', category: 'Plant Accessories', description: '' });
+  const [expenseData, setExpenseData] = useState({ amount: '', category: 'Plant Accessories', description: '', account_name: 'Cash in Hand' });
 
   const [showWithdrawForm, setShowWithdrawForm] = useState(false);
-  const [withdrawData, setWithdrawData] = useState({ amount: '', category: 'Personal Use', description: '' });
+  const [withdrawData, setWithdrawData] = useState({ amount: '', category: 'Personal Use', description: '', account_name: 'Cash in Hand' });
 
-  // Monthly Growth Calculation (Current Month Income vs Previous Month Income)
-  const currentMonth = new Date().getMonth();
-  const prevMonthIncome = transactions.filter(t => t.type === 'Income' && new Date(t.date || Date.now()).getMonth() === (currentMonth - 1 < 0 ? 11 : currentMonth - 1)).reduce((sum, t) => sum + t.amount, 0);
+  // Monthly Growth Calculation (Current Month Income vs Previous Month Income - with year boundary check)
+  const now = new Date();
+  const currentMonthVal = now.getMonth();
+  const currentYearVal = now.getFullYear();
+  const prevMonthVal = currentMonthVal === 0 ? 11 : currentMonthVal - 1;
+  const prevYearVal = currentMonthVal === 0 ? currentYearVal - 1 : currentYearVal;
+
+  const prevMonthIncome = transactions.filter(t => {
+    if (t.type !== 'Income' || t.category === 'Account Transfer') return false;
+    const d = new Date(t.date || Date.now());
+    return d.getMonth() === prevMonthVal && d.getFullYear() === prevYearVal;
+  }).reduce((sum, t) => sum + t.amount, 0);
   
   const monthlyGrowth = prevMonthIncome === 0 
     ? (currentMonthIncome > 0 ? 100 : 0) 
@@ -1004,13 +1166,13 @@ export default function App() {
     const d = new Date();
     d.setMonth(d.getMonth() - (5 - i)); // Last 6 months chronological
     const monthName = d.toLocaleString('default', { month: 'short' });
-    const income = transactions.filter(t => t.type === 'Income' && new Date(t.date || Date.now()).getMonth() === d.getMonth()).reduce((s, t) => s + t.amount, 0);
+    const income = transactions.filter(t => t.type === 'Income' && t.category !== 'Account Transfer' && new Date(t.date || Date.now()).getMonth() === d.getMonth()).reduce((s, t) => s + t.amount, 0);
     return { name: monthName, income };
   });
 
   // Expense Distribution Data
   const expenseDistribution = Object.entries(
-    transactions.filter(t => t.type === 'Expense').reduce((acc, t) => {
+    transactions.filter(t => t.type === 'Expense' && t.category !== 'Account Transfer').reduce((acc, t) => {
       // Remove 'Withdrawal: ' prefix for cleaner chart labels
       const cat = t.category.replace('Withdrawal: ', '');
       acc[cat] = (acc[cat] || 0) + t.amount;
@@ -1022,25 +1184,24 @@ export default function App() {
 
   const handleWithdraw = async () => {
     if (!withdrawData.amount) {
-      setToast({ visible: true, message: "Please enter the amount" });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Please enter the amount");
       return;
     }
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/transactions', {
+      const response = await fetch(`${API_BASE}/api/transactions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           type: 'Expense', 
           amount: parseFloat(withdrawData.amount), 
           category: `Withdrawal: ${withdrawData.category}`, 
-          description: withdrawData.description || 'Capital Withdrawal' 
+          description: withdrawData.description || 'Capital Withdrawal',
+          account_name: withdrawData.account_name || 'Cash in Hand'
         }),
       });
       if (response.ok) {
-        setToast({ visible: true, message: "Withdrawal recorded successfully!" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
-        setWithdrawData({ amount: '', category: 'Personal Use', description: '' });
+        showToast("Withdrawal recorded successfully!");
+        setWithdrawData({ amount: '', category: 'Personal Use', description: '', account_name: 'Cash in Hand' });
         setShowWithdrawForm(false);
         fetchTransactions();
       }
@@ -1051,31 +1212,29 @@ export default function App() {
 
   const handleAddExpense = async () => {
     if (!expenseData.amount) {
-      setToast({ visible: true, message: "Please enter the amount" });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Please enter the amount");
       return;
     }
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/transactions', {
+      const response = await fetch(`${API_BASE}/api/transactions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           type: 'Expense', 
           amount: parseFloat(expenseData.amount), 
           category: expenseData.category, 
-          description: expenseData.description || 'No description provided' 
+          description: expenseData.description || 'No description provided',
+          account_name: expenseData.account_name || 'Cash in Hand'
         }),
       });
       if (response.ok) {
-        setToast({ visible: true, message: "Expense recorded successfully!" });
-        setTimeout(() => setToast({ visible: false, message: '' }), 3000);
-        setExpenseData({ amount: '', category: 'Plant Accessories', description: '' });
+        showToast("Expense recorded successfully!");
+        setExpenseData({ amount: '', category: 'Plant Accessories', description: '', account_name: 'Cash in Hand' });
         setShowExpenseForm(false);
         fetchTransactions();
       }
     } catch (error) {
-      setToast({ visible: true, message: "Network error! Server is down." });
-      setTimeout(() => setToast({ visible: false, message: '' }), 3000);
+      showToast("Network error! Server is down.");
     }
   };
 
@@ -1289,7 +1448,7 @@ export default function App() {
               <div>
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Today's Revenue</p>
                 <p className="text-xl md:text-2xl font-bold tracking-tight text-slate-900">
-                  LKR {transactions.filter(t => t.type === 'Income' && new Date(t.date || Date.now()).toDateString() === new Date().toDateString()).reduce((sum, t) => sum + t.amount, 0).toLocaleString()}
+                  LKR {transactions.filter(t => t.type === 'Income' && t.category !== 'Account Transfer' && new Date(t.date || Date.now()).toDateString() === new Date().toDateString()).reduce((sum, t) => sum + t.amount, 0).toLocaleString()}
                 </p>
               </div>
             </div>
@@ -1310,7 +1469,7 @@ export default function App() {
               <div className="w-9 h-9 rounded-xl border border-slate-100 bg-slate-50 flex items-center justify-center text-slate-500 group-hover:bg-slate-800 group-hover:text-white transition-all mb-4"><PieChartIcon size={16} strokeWidth={2.5}/></div>
               <div>
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Orders</p>
-                <p className="text-xl md:text-2xl font-bold tracking-tight text-slate-900">{transactions.filter(t => t.type === 'Income').length}</p>
+                <p className="text-xl md:text-2xl font-bold tracking-tight text-slate-900">{transactions.filter(t => t.type === 'Income' && t.category !== 'Account Transfer').length}</p>
               </div>
             </div>
 
@@ -1336,7 +1495,7 @@ export default function App() {
               
               <div className="divide-y divide-slate-800/80 relative z-10">
                 {transactions.slice(0, 4).map((t, i) => (
-                  <div key={i} className="py-3 md:py-4 flex items-center justify-between">
+                  <div key={t.id || i} className="py-3 md:py-4 flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className={`w-8 h-8 rounded-full flex items-center justify-center ${t.type === 'Income' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
                         {t.type === 'Income' ? <ArrowUpRight size={14} strokeWidth={2.5}/> : <ArrowDownRight size={14} strokeWidth={2.5}/>}
@@ -1344,6 +1503,12 @@ export default function App() {
                       <div>
                         <p className="text-xs md:text-sm font-bold text-slate-200">{t.category}</p>
                         <p className="text-[9px] md:text-[10px] text-slate-500 font-semibold mt-0.5 max-w-[120px] sm:max-w-[200px] truncate">{t.description}</p>
+                        {t.date && (
+                          <p className="text-[9px] text-slate-400 font-medium mt-0.5 flex items-center gap-1">
+                            <Calendar size={9} className="text-slate-500" />
+                            {formatDate(t.date)}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <p className={`text-xs md:text-sm font-bold ${t.type === 'Income' ? 'text-emerald-400' : 'text-slate-300'}`}>
@@ -1479,7 +1644,31 @@ export default function App() {
                               <p className="text-[10px] text-slate-400 font-semibold mt-0.5 max-w-[280px] truncate">{tx.description || 'Direct Order'}</p>
                               <p className="text-[9px] text-slate-400 mt-0.5">{new Date(tx.date).toLocaleDateString()}</p>
                             </div>
-                            <p className="text-xs font-bold text-emerald-500">+ LKR {tx.amount.toLocaleString()}</p>
+                            {editingTransactionId === tx.id ? (
+                              <div className="flex flex-col gap-1.5 items-end">
+                                <input
+                                  type="number"
+                                  value={editingAmount}
+                                  onChange={(e) => setEditingAmount(e.target.value)}
+                                  className="w-24 px-2 py-1 text-xs font-bold text-slate-800 bg-white border border-slate-300 rounded outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                                  autoFocus
+                                />
+                                <div className="flex gap-1.5">
+                                  <button onClick={() => saveTransactionAmount(tx.id)} className="text-[9px] font-bold bg-emerald-500 hover:bg-emerald-600 text-white px-2 py-1 rounded transition-colors shadow-sm cursor-pointer">Save</button>
+                                  <button onClick={() => setEditingTransactionId(null)} className="text-[9px] font-bold bg-slate-200 hover:bg-slate-300 text-slate-600 px-2 py-1 rounded transition-colors cursor-pointer">Cancel</button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-end gap-1.5">
+                                <p className="text-xs font-bold text-emerald-500">+ LKR {tx.amount.toLocaleString()}</p>
+                                <button 
+                                  onClick={() => { setEditingTransactionId(tx.id); setEditingAmount(tx.amount); }} 
+                                  className="text-[10px] text-slate-400 hover:text-emerald-600 flex items-center gap-1 transition-colors bg-white/50 hover:bg-emerald-50 px-2 py-0.5 rounded cursor-pointer"
+                                >
+                                  <Edit size={10} /> Edit
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ))
                       )}
@@ -1574,9 +1763,56 @@ export default function App() {
           {/* Form Section */}
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5 print:hidden">
             <div className="grid grid-cols-2 gap-4">
-              <div>
+              <div className="relative">
                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Customer Name</label>
-                <input type="text" value={billData.customerName} onChange={(e) => setBillData({...billData, customerName: e.target.value})} className="w-full bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-sm font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-400 transition-all placeholder:text-slate-400" placeholder="e.g. John Doe" />
+                <input 
+                  type="text" 
+                  value={billData.customerName} 
+                  onChange={(e) => setBillData({...billData, customerName: e.target.value})} 
+                  onFocus={() => setIsClientDropdownOpen(true)}
+                  onBlur={() => setIsClientDropdownOpen(false)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-sm font-medium text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-400 transition-all placeholder:text-slate-400" 
+                  placeholder="e.g. John Doe"
+                  autoComplete="off"
+                />
+                {isClientDropdownOpen && filteredSuggestions.length > 0 && (
+                  <div className="absolute z-50 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-60 overflow-y-auto divide-y divide-slate-100 animate-in fade-in slide-in-from-top-2 duration-200">
+                    {filteredSuggestions.map((cust) => (
+                      <div
+                        key={cust.id}
+                        onMouseDown={() => {
+                          setBillData(prev => ({
+                            ...prev,
+                            customerName: cust.name,
+                            addressLine1: cust.address_line1 || '',
+                            addressLine2: cust.address_line2 || '',
+                            city: cust.city || '',
+                            gender: cust.gender || 'Male'
+                          }));
+                          setIsClientDropdownOpen(false);
+                        }}
+                        className="p-3 flex items-center justify-between hover:bg-slate-50 cursor-pointer transition-colors text-left"
+                      >
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">{cust.name}</p>
+                          {(cust.city || cust.gender) && (
+                            <p className="text-[10px] text-slate-400 font-medium mt-0.5">
+                              {[cust.city, cust.gender].filter(Boolean).join(' • ')}
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-[10px] font-bold text-slate-500">{cust.total_orders} orders</p>
+                          {(cust.total_spent || 0) >= 10000 && (
+                            <span className="inline-block mt-0.5 text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded-sm">
+                              VIP
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Date</label>
@@ -1610,11 +1846,17 @@ export default function App() {
 
             {/* Payment & Tracking Section */}
             <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-4 print:hidden mb-4">
-              <div>
-                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 block">Payment Method</label>
-                <div className="flex gap-2 bg-slate-200/50 p-1 rounded-md">
-                  <button type="button" onClick={() => setPaymentMethod('Direct')} className={`flex-1 py-2 text-xs font-bold rounded uppercase tracking-wider cursor-pointer transition-colors ${paymentMethod === 'Direct' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>Direct Payment</button>
-                  <button type="button" onClick={() => setPaymentMethod('COD')} className={`flex-1 py-2 text-xs font-bold rounded uppercase tracking-wider cursor-pointer transition-colors ${paymentMethod === 'COD' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>Cash On Delivery</button>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 block">Payment Method</label>
+                  <div className="flex gap-2 bg-slate-200/50 p-1 rounded-md">
+                    <button type="button" onClick={() => setPaymentMethod('Direct')} className={`flex-1 py-2 text-xs font-bold rounded uppercase tracking-wider cursor-pointer transition-colors ${paymentMethod === 'Direct' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>Direct Payment</button>
+                    <button type="button" onClick={() => setPaymentMethod('COD')} className={`flex-1 py-2 text-xs font-bold rounded uppercase tracking-wider cursor-pointer transition-colors ${paymentMethod === 'COD' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}>Cash On Delivery</button>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Internal Expense / Postage (LKR)</label>
+                  <input type="number" placeholder="e.g. 150" value={internalExpense} onChange={(e) => setInternalExpense(e.target.value)} className="w-full bg-white border border-slate-200 rounded-md px-3 py-2 text-sm font-medium focus:outline-none focus:ring-1 focus:ring-slate-400 text-slate-900" />
                 </div>
               </div>
 
@@ -1810,9 +2052,15 @@ export default function App() {
                     </div>
                     
                     <div className="flex items-center gap-4">
-                      <div className="text-right">
+                      {bill.internalExpense > 0 && (
+                        <div className="text-right">
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-0.5">Internal Exp.</p>
+                          <p className="text-sm font-black text-slate-500">LKR {bill.internalExpense.toLocaleString()}</p>
+                        </div>
+                      )}
+                      <div className={`text-right ${bill.internalExpense > 0 ? 'border-l border-slate-200 pl-4' : ''}`}>
                         <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-0.5">Profit</p>
-                        <p className="text-sm font-black text-emerald-600">LKR {bill.profitAmount.toLocaleString()}</p>
+                        <p className="text-sm font-black text-emerald-600">LKR {(bill.profitAmount - (bill.internalExpense || 0)).toLocaleString()}</p>
                       </div>
                       <div className="text-right border-l border-slate-200 pl-4">
                         <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-0.5">Total Bill</p>
@@ -1975,7 +2223,7 @@ export default function App() {
                           </span>
                         </div>
                         <p className="text-[10px] text-slate-500 font-semibold mt-1">
-                          {c.total_orders} Orders • Last: {c.last_order || 'N/A'}
+                          {c.total_orders} Orders â€¢ Last: {c.last_order || 'N/A'}
                         </p>
                         {(c.address_line1 || c.city) && (
                           <p className="text-[9px] text-slate-400 font-medium mt-0.5 max-w-[200px] sm:max-w-md truncate">
@@ -2041,6 +2289,13 @@ export default function App() {
                 {showExpenseForm ? <X size={16} strokeWidth={2.5}/> : <Minus size={16} strokeWidth={2.5} className="text-slate-400"/>}
                 {showExpenseForm ? 'Cancel' : 'Expense'}
               </button>
+              <button 
+                onClick={() => { setIsTransferModalOpen(true); setShowExpenseForm(false); setShowWithdrawForm(false); }}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-600/20 active:scale-95"
+              >
+                <ArrowUpRight size={16} strokeWidth={2.5}/>
+                Transfer
+              </button>
             </div>
           </div>
 
@@ -2062,7 +2317,13 @@ export default function App() {
                     <option value="Other">Other Expenses</option>
                   </select>
                 </div>
-                <div className="md:col-span-2">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Debit From Account</label>
+                  <select value={expenseData.account_name} onChange={(e) => setExpenseData({...expenseData, account_name: e.target.value})} className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-100 focus:border-slate-300 transition-all cursor-pointer">
+                    {ACCOUNTS.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+                <div className="md:col-span-1">
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Description</label>
                   <input type="text" placeholder="e.g. Bought 50 terracotta pots from Kandy" value={expenseData.description} onChange={(e) => setExpenseData({...expenseData, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-100 focus:border-slate-300 transition-all" />
                 </div>
@@ -2090,7 +2351,13 @@ export default function App() {
                     <option value="Savings">Savings</option>
                   </select>
                 </div>
-                <div className="md:col-span-2">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Debit From Account</label>
+                  <select value={withdrawData.account_name} onChange={(e) => setWithdrawData({...withdrawData, account_name: e.target.value})} className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-100 focus:border-slate-300 transition-all cursor-pointer">
+                    {ACCOUNTS.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+                <div>
                   <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Memo / Note</label>
                   <input type="text" placeholder="e.g. Withdrew for CDS deposit" value={withdrawData.description} onChange={(e) => setWithdrawData({...withdrawData, description: e.target.value})} className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-slate-100 focus:border-slate-300 transition-all" />
                 </div>
@@ -2132,6 +2399,68 @@ export default function App() {
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest">Total Expenses</p>
                 </div>
                 <p className="text-lg font-semibold text-slate-200">LKR {totalExpense.toLocaleString()}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* ---- ACCOUNTS OVERVIEW SECTION ---- */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">Accounts Overview</h3>
+                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mt-0.5">Net balance per wallet</p>
+              </div>
+              <button
+                onClick={() => setIsTransferModalOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-[10px] font-black uppercase tracking-wider rounded-xl border border-indigo-100 transition-all cursor-pointer"
+              >
+                <ArrowUpRight size={12} strokeWidth={3}/> Transfer
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Cash in Hand */}
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-5 shadow-sm relative overflow-hidden group hover:shadow-md hover:border-emerald-300 transition-all">
+                <div className="absolute top-0 right-0 w-20 h-20 bg-emerald-500/5 rounded-full -mr-6 -mt-6"/>
+                <div className="flex items-center gap-2.5 mb-3">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                    <Wallet size={15} strokeWidth={2.5}/>
+                  </div>
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Cash in Hand</p>
+                </div>
+                <p className={`text-xl font-black tracking-tight ${cashBalance >= 0 ? 'text-slate-900' : 'text-rose-600'}`}>
+                  LKR {Math.abs(cashBalance).toLocaleString()}
+                </p>
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">{cashBalance >= 0 ? 'Available' : 'Deficit'}</p>
+              </div>
+
+              {/* Bank Account */}
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-5 shadow-sm relative overflow-hidden group hover:shadow-md hover:border-blue-300 transition-all">
+                <div className="absolute top-0 right-0 w-20 h-20 bg-blue-500/5 rounded-full -mr-6 -mt-6"/>
+                <div className="flex items-center gap-2.5 mb-3">
+                  <div className="w-8 h-8 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-600">
+                    <CreditCard size={15} strokeWidth={2.5}/>
+                  </div>
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Bank Account</p>
+                </div>
+                <p className={`text-xl font-black tracking-tight ${bankBalance >= 0 ? 'text-slate-900' : 'text-rose-600'}`}>
+                  LKR {Math.abs(bankBalance).toLocaleString()}
+                </p>
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">{bankBalance >= 0 ? 'Available' : 'Deficit'}</p>
+              </div>
+
+              {/* COD Pending */}
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-5 shadow-sm relative overflow-hidden group hover:shadow-md hover:border-amber-300 transition-all">
+                <div className="absolute top-0 right-0 w-20 h-20 bg-amber-500/5 rounded-full -mr-6 -mt-6"/>
+                <div className="flex items-center gap-2.5 mb-3">
+                  <div className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600">
+                    <Activity size={15} strokeWidth={2.5}/>
+                  </div>
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">COD Pending</p>
+                </div>
+                <p className={`text-xl font-black tracking-tight ${codBalance >= 0 ? 'text-slate-900' : 'text-rose-600'}`}>
+                  LKR {Math.abs(codBalance).toLocaleString()}
+                </p>
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">{codBalance >= 0 ? 'In Transit' : 'Deficit'}</p>
               </div>
             </div>
           </div>
@@ -2278,7 +2607,7 @@ export default function App() {
                 <div className="p-8 text-center text-slate-400 text-sm font-medium">No transactions yet.</div>
               ) : (
                 transactions.map((t, i) => (
-                  <div key={i} className="p-5 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                  <div key={t.id || i} className="p-5 flex items-center justify-between hover:bg-slate-50 transition-colors">
                     <div className="flex items-center gap-4">
                       <div className={`w-10 h-10 rounded-full flex items-center justify-center ${t.type === 'Income' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
                         {t.type === 'Income' ? <ArrowUpRight size={18} strokeWidth={2.5} /> : <ArrowDownRight size={18} strokeWidth={2.5} />}
@@ -2286,6 +2615,21 @@ export default function App() {
                       <div>
                         <p className="text-sm font-bold text-slate-900">{t.category}</p>
                         <p className="text-[10px] text-slate-500 font-medium mt-0.5 truncate max-w-[150px] md:max-w-xs">{t.description}</p>
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          {t.account_name && (
+                            <span className={`text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded ${
+                              t.account_name === 'Cash in Hand' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
+                              t.account_name === 'Bank Account' ? 'bg-blue-50 text-blue-700 border border-blue-100' :
+                              'bg-amber-50 text-amber-700 border border-amber-100'
+                            }`}>{t.account_name}</span>
+                          )}
+                          {t.date && (
+                            <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+                              <Calendar size={10} className="text-slate-400" />
+                              {formatDate(t.date)}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-4">
@@ -2384,31 +2728,97 @@ export default function App() {
 
         </main>
       )}
+      {/* BANK ACCOUNTS TAB */}
+      {activeTab === 'bank' && (
+        <main className="px-4 md:px-8 pt-6 flex flex-col gap-6 animate-in fade-in slide-in-from-bottom-4 duration-300 pb-32 min-h-screen">
+          <div className="flex items-end justify-between border-b border-slate-200/60 pb-4">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Accounts</h2>
+              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mt-1">Multi-Wallet Overview</p>
+            </div>
+            <div className="px-3 py-1.5 bg-emerald-50 border border-emerald-100 rounded-xl flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"/>
+              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Live</span>
+            </div>
+          </div>
+          <div className="bg-[#0b0f19] text-white rounded-3xl p-6 md:p-8 shadow-2xl relative overflow-hidden border border-slate-800">
+            <div className="absolute top-0 right-0 w-72 h-72 bg-emerald-500/10 rounded-full blur-[80px] pointer-events-none"/>
+            <div className="absolute -bottom-8 -left-8 w-40 h-40 bg-blue-600/10 rounded-full blur-[50px] pointer-events-none"/>
+            <div className="relative z-10">
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Combined Net Balance</p>
+              <p className="text-4xl md:text-5xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-white via-slate-100 to-slate-400">LKR {(cashBalance + bankBalance + codBalance).toLocaleString()}</p>
+              <div className="flex flex-wrap gap-6 mt-5 pt-5 border-t border-slate-800/80">
+                <div><p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-1">Cash in Hand</p><p className={`text-sm font-bold ${cashBalance >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>LKR {cashBalance.toLocaleString()}</p></div>
+                <div className="border-l border-slate-800 pl-6"><p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-1">Bank Account</p><p className={`text-sm font-bold ${bankBalance >= 0 ? 'text-blue-400' : 'text-rose-400'}`}>LKR {bankBalance.toLocaleString()}</p></div>
+                <div className="border-l border-slate-800 pl-6"><p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-1">COD Pending</p><p className={`text-sm font-bold ${codBalance >= 0 ? 'text-amber-400' : 'text-rose-400'}`}>LKR {codBalance.toLocaleString()}</p></div>
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="bg-[#0b1121] rounded-2xl p-5 border border-slate-800 shadow-xl relative overflow-hidden group hover:border-emerald-800/60 transition-all"><div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/10 rounded-full -mr-8 -mt-8 group-hover:bg-emerald-500/20 transition-colors"/><div className="relative z-10"><div className="flex items-center justify-between mb-4"><div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400"><Wallet size={18} strokeWidth={2}/></div><span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-lg ${cashBalance >= 0 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>{cashBalance >= 0 ? 'Active' : 'Deficit'}</span></div><p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Cash in Hand</p><p className={`text-2xl font-black tracking-tight ${cashBalance >= 0 ? 'text-white' : 'text-rose-400'}`}>LKR {Math.abs(cashBalance).toLocaleString()}</p><div className="mt-3 pt-3 border-t border-slate-800"><p className="text-[9px] text-slate-600 font-semibold">{transactions.filter(t => t.account_name === 'Cash in Hand').length} transactions</p></div></div></div>
+            <div className="bg-[#0b1121] rounded-2xl p-5 border border-slate-800 shadow-xl relative overflow-hidden group hover:border-blue-800/60 transition-all"><div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/10 rounded-full -mr-8 -mt-8 group-hover:bg-blue-500/20 transition-colors"/><div className="relative z-10"><div className="flex items-center justify-between mb-4"><div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400"><Building2 size={18} strokeWidth={2}/></div><span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-lg ${bankBalance >= 0 ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>{bankBalance >= 0 ? 'Active' : 'Deficit'}</span></div><p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Bank Account</p><p className={`text-2xl font-black tracking-tight ${bankBalance >= 0 ? 'text-white' : 'text-rose-400'}`}>LKR {Math.abs(bankBalance).toLocaleString()}</p><div className="mt-3 pt-3 border-t border-slate-800"><p className="text-[9px] text-slate-600 font-semibold">{transactions.filter(t => t.account_name === 'Bank Account').length} transactions</p></div></div></div>
+            <div className="bg-[#0b1121] rounded-2xl p-5 border border-slate-800 shadow-xl relative overflow-hidden group hover:border-amber-800/60 transition-all"><div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/10 rounded-full -mr-8 -mt-8 group-hover:bg-amber-500/20 transition-colors"/><div className="relative z-10"><div className="flex items-center justify-between mb-4"><div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400"><Activity size={18} strokeWidth={2}/></div><span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-lg ${codBalance >= 0 ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>{codBalance >= 0 ? 'In Transit' : 'Deficit'}</span></div><p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">COD Pending</p><p className={`text-2xl font-black tracking-tight ${codBalance >= 0 ? 'text-white' : 'text-rose-400'}`}>LKR {Math.abs(codBalance).toLocaleString()}</p><div className="mt-3 pt-3 border-t border-slate-800"><p className="text-[9px] text-slate-600 font-semibold">{transactions.filter(t => t.account_name === 'COD Pending').length} transactions</p></div></div></div>
+          </div>
+
+          {/* MONTH END SETTLEMENT BANNER */}
+          <div className="bg-[#0b1121] rounded-3xl p-6 border border-emerald-500/20 shadow-2xl relative overflow-hidden flex flex-col md:flex-row md:items-center justify-between gap-6 mt-2 group hover:border-emerald-500/40 transition-all">
+            <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-[80px] pointer-events-none group-hover:bg-emerald-500/20 transition-all"/>
+            <div className="absolute bottom-0 left-0 w-32 h-32 bg-emerald-600/10 rounded-full blur-[50px] pointer-events-none"/>
+            <div className="relative z-10 flex flex-col">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 flex shrink-0 items-center justify-center border border-emerald-500/20"><CheckCircle size={22} className="text-emerald-400"/></div> 
+                <div>
+                  <h3 className="text-lg font-black text-white tracking-tight">Month End Settlement</h3>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Move all available Cash in Hand to your Bank Account</p>
+                </div>
+              </div>
+            </div>
+            <div className="relative z-10">
+              <button onClick={handleMonthEndSettlement} disabled={cashBalance <= 0} className={`w-full md:w-auto px-8 py-4 rounded-2xl text-xs font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 whitespace-nowrap ${cashBalance > 0 ? 'bg-emerald-500 hover:bg-emerald-400 text-[#0b1121] shadow-[0_0_20px_rgba(16,185,129,0.3)] hover:shadow-[0_0_30px_rgba(16,185,129,0.4)] active:scale-[0.98]' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}>
+                Settle LKR {Math.max(0, cashBalance).toLocaleString()} <ArrowUpRight size={18} strokeWidth={2.5}/>
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-[#0b1121] rounded-3xl p-6 border border-slate-800 shadow-xl relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-600/5 rounded-full blur-[80px] pointer-events-none"/>
+            <div className="relative z-10">
+              <div className="flex items-center gap-3 mb-6"><div className="w-10 h-10 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400"><ArrowLeftRight size={18} strokeWidth={2}/></div><div><h3 className="text-sm font-black text-white tracking-tight">Transfer Money</h3><p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Move funds between wallets</p></div></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div><label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">From Account</label><select value={transferData.fromAccount} onChange={(e) => setTransferData({...transferData, fromAccount: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all cursor-pointer">{ACCOUNTS.map(a => <option key={a} value={a} className="bg-slate-900">{a}</option>)}</select></div>
+                <div><label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">To Account</label><select value={transferData.toAccount} onChange={(e) => setTransferData({...transferData, toAccount: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all cursor-pointer">{ACCOUNTS.map(a => <option key={a} value={a} className="bg-slate-900">{a}</option>)}</select></div>
+              </div>
+              <div className="mb-4"><label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Amount (LKR)</label><div className="relative"><span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 font-bold text-sm">LKR</span><input type="number" placeholder="0.00" value={transferData.amount} onChange={(e) => setTransferData({...transferData, amount: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-2xl pl-14 pr-4 py-4 text-2xl font-black text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all placeholder:text-slate-700"/></div></div>
+              <div className="mb-5"><label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Note (Optional)</label><input type="text" placeholder="e.g. Moving cash to bank for savings" value={transferData.description} onChange={(e) => setTransferData({...transferData, description: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all placeholder:text-slate-700"/></div>
+              {transferData.fromAccount === transferData.toAccount && (<p className="text-[11px] font-bold text-rose-400 mb-3 text-center">Source and destination must differ</p>)}
+              <button onClick={handleTransfer} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 rounded-2xl text-sm font-black uppercase tracking-widest transition-all active:scale-[0.98] shadow-lg shadow-indigo-600/30 cursor-pointer flex items-center justify-center gap-2"><ArrowLeftRight size={16} strokeWidth={2.5}/> Confirm Transfer</button>
+            </div>
+          </div>
+          <div className="bg-[#0b1121] rounded-3xl border border-slate-800 shadow-xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 flex items-center gap-3"><div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center text-slate-400"><RefreshCw size={13} strokeWidth={2.5}/></div><div><h3 className="text-xs font-black text-slate-200 uppercase tracking-widest">Account Ledger</h3><p className="text-[9px] text-slate-500 font-semibold uppercase tracking-widest mt-0.5">Transaction history by wallet</p></div></div>
+            {[{label:'Cash in Hand',balance:cashBalance,ac:'text-emerald-400',icon:<Wallet size={13} strokeWidth={2}/>},{label:'Bank Account',balance:bankBalance,ac:'text-blue-400',icon:<Building2 size={13} strokeWidth={2}/>},{label:'COD Pending',balance:codBalance,ac:'text-amber-400',icon:<Activity size={13} strokeWidth={2}/>}].map(({label,balance,ac,icon})=>{const acctTxns=transactions.filter(t=>t.account_name===label);return(<div key={label} className="border-b border-slate-800 last:border-0"><div className="px-6 py-3 flex items-center justify-between bg-slate-900/50"><div className="flex items-center gap-2 text-slate-500">{icon}<span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{label}</span></div><span className={`text-xs font-black ${balance>=0?ac:'text-rose-400'}`}>Net: LKR {balance.toLocaleString()}</span></div>{acctTxns.length===0?(<div className="px-6 py-5 text-center text-slate-700 text-xs font-semibold">No activity yet</div>):(<div className="divide-y divide-slate-800/40 max-h-[220px] overflow-y-auto">{acctTxns.map((t,i)=>(<div key={i} className="px-6 py-3 flex items-center justify-between hover:bg-slate-800/30 transition-colors"><div className="flex items-center gap-3"><div className={`w-7 h-7 rounded-full flex items-center justify-center ${t.type==='Income'?'bg-emerald-500/10 text-emerald-400':'bg-rose-500/10 text-rose-400'}`}>{t.type==='Income'?<ArrowUpRight size={13} strokeWidth={2.5}/>:<ArrowDownRight size={13} strokeWidth={2.5}/>}</div><div><p className="text-xs font-bold text-slate-300">{t.category}</p><p className="text-[9px] text-slate-600 font-semibold truncate max-w-[150px] md:max-w-xs">{t.description||'—'}</p></div></div><p className={`text-xs font-bold ${t.type==='Income'?'text-emerald-400':'text-slate-500'}`}>{t.type==='Income'?'+':'-'} LKR {t.amount.toLocaleString()}</p></div>))}</div>)}</div>);})}
+          </div>
+        </main>
+      )}
 
       {/* Corporate/Clean Bottom Navigation */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-lg border-t border-slate-200 px-6 py-3 pb-safe z-40 print:hidden text-center mx-auto">
-        <nav className="flex justify-between items-center w-full max-w-md mx-auto">
+      <div className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-lg border-t border-slate-200 px-2 py-2 pb-safe z-40 print:hidden">
+        <nav className="flex justify-between items-center w-full max-w-lg mx-auto">
           <button 
-  onClick={() => {
-    setActiveTab('home');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }} 
-  className={`flex flex-col items-center gap-1.5 p-2 w-16 transition-colors cursor-pointer ${activeTab === 'home' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
-  <Home size={22} strokeWidth={2} />
-  <span className="text-[10px] font-semibold tracking-wider">Home</span>
+            onClick={() => { setActiveTab('home'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
+            className={`flex flex-col items-center gap-1 p-2 w-12 transition-colors cursor-pointer ${activeTab === 'home' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
+            <Home size={20} strokeWidth={2} />
+            <span className="text-[9px] font-semibold tracking-wider">Home</span>
           </button>
           
           <button 
-  onClick={() => {
-    setActiveTab('bills');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }} 
-  className={`flex flex-col items-center gap-1.5 p-2 w-16 transition-colors cursor-pointer ${activeTab === 'bills' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
-  <ReceiptText size={22} strokeWidth={2} />
-  <span className="text-[10px] font-semibold tracking-wider">Bills</span>
+            onClick={() => { setActiveTab('bills'); window.scrollTo({ top: 0, behavior: 'smooth' }); }} 
+            className={`flex flex-col items-center gap-1 p-2 w-12 transition-colors cursor-pointer ${activeTab === 'bills' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
+            <ReceiptText size={20} strokeWidth={2} />
+            <span className="text-[9px] font-semibold tracking-wider">Bills</span>
           </button>
-          
-          <div className="relative -mt-8">
+
+          <div className="relative -mt-8 flex-shrink-0">
             <button 
               onClick={() => setIsModalOpen(true)}
               className="w-14 h-14 bg-zinc-900 rounded-full flex items-center justify-center shadow-lg hover:bg-zinc-800 active:scale-95 transition-all text-white border-4 border-[#F8FAFC] cursor-pointer">
@@ -2417,23 +2827,24 @@ export default function App() {
           </div>
 
           <button 
-            onClick={() => {
-              setActiveTab('crm');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            className={`flex flex-col items-center gap-1.5 p-2 w-16 transition-colors cursor-pointer ${activeTab === 'crm' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
-            <Users size={22} strokeWidth={1.5} />
-            <span className="text-[10px] font-semibold tracking-wider">CRM</span>
+            onClick={() => { setActiveTab('crm'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            className={`flex flex-col items-center gap-1 p-2 w-12 transition-colors cursor-pointer ${activeTab === 'crm' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
+            <Users size={20} strokeWidth={1.5} />
+            <span className="text-[9px] font-semibold tracking-wider">CRM</span>
           </button>
 
           <button 
-            onClick={() => {
-              setActiveTab('wallet');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-            className={`flex flex-col items-center gap-1.5 p-2 w-16 transition-colors cursor-pointer ${activeTab === 'wallet' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
-            <Wallet size={22} strokeWidth={1.5} />
-            <span className="text-[10px] font-semibold tracking-wider">Wallet</span>
+            onClick={() => { setActiveTab('wallet'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            className={`flex flex-col items-center gap-1 p-2 w-12 transition-colors cursor-pointer ${activeTab === 'wallet' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-900'}`}>
+            <Wallet size={20} strokeWidth={1.5} />
+            <span className="text-[9px] font-semibold tracking-wider">Finance</span>
+          </button>
+
+          <button 
+            onClick={() => { setActiveTab('bank'); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+            className={`flex flex-col items-center gap-1 p-2 w-12 transition-colors cursor-pointer ${activeTab === 'bank' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-900'}`}>
+            <Building2 size={20} strokeWidth={1.5} />
+            <span className="text-[9px] font-semibold tracking-wider">Accounts</span>
           </button>
         </nav>
       </div>
@@ -2530,6 +2941,17 @@ export default function App() {
                 />
               </div>
 
+              <div>
+                <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-widest mb-1.5 block">Account / Wallet</label>
+                <select
+                  value={accountName}
+                  onChange={(e) => setAccountName(e.target.value)}
+                  className="w-full bg-slate-100 border border-slate-100/50 rounded-md px-4 py-3 text-sm font-medium text-slate-950 focus:outline-none focus:ring-1 focus:ring-slate-400 focus:border-slate-400 focus:bg-white transition-all cursor-pointer"
+                >
+                  {ACCOUNTS.map(a => <option key={a} value={a}>{a}</option>)}
+                </select>
+              </div>
+
               <div className="pt-3">
                 <button 
                   type="submit"
@@ -2540,6 +2962,89 @@ export default function App() {
               </div>
             </form>
             
+          </div>
+        </div>
+      )}
+
+      {/* --- TRANSFER MONEY MODAL --- */}
+      {isTransferModalOpen && (
+        <div onClick={() => setIsTransferModalOpen(false)} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-md animate-in fade-in duration-300">
+          <div onClick={(e) => e.stopPropagation()} className="bg-white rounded-[2rem] p-7 w-full max-w-md shadow-[0_20px_50px_-12px_rgba(0,0,0,0.3)] relative animate-in zoom-in-95 duration-300 border border-slate-100">
+            <button onClick={() => setIsTransferModalOpen(false)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 p-2.5 rounded-full transition-all cursor-pointer">
+              <X size={18} strokeWidth={2.5}/>
+            </button>
+            <div className="mb-6 pl-1">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+                  <ArrowUpRight size={18} strokeWidth={2.5}/>
+                </div>
+                <div>
+                  <h3 className="text-xl font-black text-slate-900 tracking-tight">Transfer Money</h3>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">Move funds between accounts</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">From Account</label>
+                  <select
+                    value={transferData.fromAccount}
+                    onChange={(e) => setTransferData({...transferData, fromAccount: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-3 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-indigo-50 focus:border-indigo-300 transition-all cursor-pointer"
+                  >
+                    {ACCOUNTS.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">To Account</label>
+                  <select
+                    value={transferData.toAccount}
+                    onChange={(e) => setTransferData({...transferData, toAccount: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-3 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-indigo-50 focus:border-indigo-300 transition-all cursor-pointer"
+                  >
+                    {ACCOUNTS.map(a => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Amount (LKR)</label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 font-semibold text-sm">LKR</span>
+                  <input
+                    type="number"
+                    placeholder="0.00"
+                    value={transferData.amount}
+                    onChange={(e) => setTransferData({...transferData, amount: e.target.value})}
+                    className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl pl-14 pr-4 py-4 text-2xl font-black text-slate-900 focus:outline-none focus:ring-4 focus:ring-indigo-50 focus:border-indigo-300 transition-all placeholder:text-slate-300"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Note (Optional)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Moving cash to bank for savings"
+                  value={transferData.description}
+                  onChange={(e) => setTransferData({...transferData, description: e.target.value})}
+                  className="w-full bg-slate-50 border border-slate-200/80 rounded-2xl px-4 py-3 text-sm font-semibold text-slate-900 focus:outline-none focus:ring-4 focus:ring-indigo-50 focus:border-indigo-300 transition-all placeholder:text-slate-400"
+                />
+              </div>
+
+              {transferData.fromAccount === transferData.toAccount && (
+                <p className="text-[11px] font-bold text-rose-500 text-center py-1">Source and destination accounts must be different</p>
+              )}
+
+              <button
+                onClick={handleTransfer}
+                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-4 rounded-2xl text-sm font-black uppercase tracking-wide transition-all active:scale-[0.98] shadow-lg shadow-indigo-500/20 cursor-pointer mt-2"
+              >
+                Confirm Transfer
+              </button>
+            </div>
           </div>
         </div>
       )}
